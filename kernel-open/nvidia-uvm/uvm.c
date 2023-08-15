@@ -43,6 +43,7 @@
 static dev_t g_uvm_base_dev;
 static struct cdev g_uvm_cdev;
 static const struct file_operations uvm_fops;
+static struct class *g_uvm_class;
 
 bool uvm_file_is_nvidia_uvm(struct file *filp)
 {
@@ -1093,9 +1094,19 @@ static void uvm_test_unload_state_exit(void)
     }
 }
 
+static char *uvm_devnode(struct device *dev, umode_t *mode)
+{
+    if (mode) {
+        *mode = 0666;
+    }
+    return NULL;
+}
+
 static int uvm_chardev_create(void)
 {
     dev_t uvm_dev;
+    dev_t tools_dev;
+    struct device *device;
 
     int ret = alloc_chrdev_region(&g_uvm_base_dev,
                                   0,
@@ -1106,8 +1117,21 @@ static int uvm_chardev_create(void)
         return ret;
     }
     uvm_dev = MKDEV(MAJOR(g_uvm_base_dev), NVIDIA_UVM_PRIMARY_MINOR_NUMBER);
+    tools_dev = MKDEV(MAJOR(g_uvm_base_dev), NVIDIA_UVM_TOOLS_MINOR_NUMBER);
 
     uvm_init_character_device(&g_uvm_cdev, &uvm_fops);
+    g_uvm_class = class_create(THIS_MODULE, NVIDIA_UVM_DEVICE_NAME);
+    g_uvm_class->devnode = uvm_devnode;
+    device = device_create(g_uvm_class, NULL, uvm_dev, NULL, NVIDIA_UVM_DEVICE_NAME, NULL);
+    if (IS_ERR(device)) {
+        ret = PTR_ERR(device);
+        printk(KERN_WARNING "Error %d while trying to create %s", ret, NVIDIA_UVM_DEVICE_NAME);
+    }
+    device = device_create(g_uvm_class, NULL, tools_dev, NULL, NVIDIA_UVM_DEVICE_NAME "-tools", NULL);
+    if (IS_ERR(device)) {
+        ret = PTR_ERR(device);
+        printk(KERN_WARNING "Error %d while trying to create %s", ret, NVIDIA_UVM_DEVICE_NAME "-tools");
+    }
     ret = cdev_add(&g_uvm_cdev, uvm_dev, 1);
     if (ret != 0) {
         UVM_ERR_PRINT("cdev_add (major %u, minor %u) failed: %d\n", MAJOR(uvm_dev), MINOR(uvm_dev), ret);
@@ -1121,6 +1145,12 @@ static int uvm_chardev_create(void)
 static void uvm_chardev_exit(void)
 {
     cdev_del(&g_uvm_cdev);
+    if (g_uvm_class) {
+        device_destroy(g_uvm_class, MKDEV(MAJOR(g_uvm_base_dev), NVIDIA_UVM_PRIMARY_MINOR_NUMBER));
+        device_destroy(g_uvm_class, MKDEV(MAJOR(g_uvm_base_dev), NVIDIA_UVM_TOOLS_MINOR_NUMBER));
+        class_destroy(g_uvm_class);
+        g_uvm_class = 0;
+    }
     unregister_chrdev_region(g_uvm_base_dev, NVIDIA_UVM_NUM_MINOR_DEVICES);
 }
 

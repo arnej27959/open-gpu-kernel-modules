@@ -80,6 +80,8 @@ static struct file_operations nv_frontend_fops = {
     .release   = nvidia_frontend_close,
 };
 
+static struct class *g_frontend_class;
+
 /* Helper functions */
 
 static int add_device(nvidia_module_t *module, nv_linux_state_t *device, NvBool all)
@@ -120,6 +122,10 @@ static int remove_device(nvidia_module_t *module, nv_linux_state_t *device)
     // remove this device from minor_number table
     if ((device != NULL) && (nv_minor_num_table[device->minor_num] != NULL))
     {
+        if (g_frontend_class) {
+            printk(KERN_WARNING "remove gpu %d\n", device->minor_num);
+            device_destroy(g_frontend_class, MKDEV(NV_MAJOR_DEVICE_NUMBER, device->minor_num));
+        }
         nv_minor_num_table[device->minor_num] = NULL;
         device->minor_num = 0;
         rc = 0;
@@ -350,13 +356,26 @@ int nvidia_frontend_mmap(
     return rc;
 }
 
+static char *frontend_devnode(struct device *dev, umode_t *mode)
+{
+    if (mode) {
+        *mode = 0666;
+    }
+    return NULL;
+}
+
 static int __init nvidia_frontend_init_module(void)
 {
     int status = 0;
+    dev_t ctl_dev;
+    dev_t modeset_dev;
+    struct device *created;
+    int i, err;
 
     // initialise nvidia module table;
     nv_num_instances = 0;
     memset(nv_minor_num_table, 0, sizeof(nv_minor_num_table));
+    printk(KERN_WARNING "initialized nv_minor_num_table\n");
     NV_INIT_MUTEX(&nv_module_table_lock);
 
     status = nvidia_init_module();
@@ -365,6 +384,7 @@ static int __init nvidia_frontend_init_module(void)
         return status;
     }
 
+    printk(KERN_WARNING "before register_chrdev\n");
     // register char device
     status = register_chrdev(NV_MAJOR_DEVICE_NUMBER, "nvidia-frontend", &nv_frontend_fops);
     if (status < 0)
@@ -372,7 +392,32 @@ static int __init nvidia_frontend_init_module(void)
         printk("NVRM: register_chrdev() failed!\n");
         nvidia_exit_module();
     }
+    g_frontend_class = class_create(THIS_MODULE, "nvidia-frontend");
+    g_frontend_class->devnode = frontend_devnode;
 
+    ctl_dev = MKDEV(NV_MAJOR_DEVICE_NUMBER, 255);
+    modeset_dev = MKDEV(NV_MAJOR_DEVICE_NUMBER, 254);
+    created = device_create(g_frontend_class, NULL, ctl_dev, NULL, "nvidiactl", NULL);
+    if (IS_ERR(created)) {
+        err = PTR_ERR(created);
+        printk(KERN_WARNING "Error %d while trying to create nvidiactl\n", err, NULL);
+    }
+    created = device_create(g_frontend_class, NULL, modeset_dev, NULL, "nvidia-modeset", NULL);
+    if (IS_ERR(created)) {
+        err = PTR_ERR(created);
+        printk(KERN_WARNING "Error %d while trying to create nvidia-modeset\n", err, NULL);
+    }
+    for (i = 0; i <= NV_FRONTEND_CONTROL_DEVICE_MINOR_MIN; i++)
+    {
+        if (nv_minor_num_table[i] != NULL) {
+            dev_t gpu_dev = MKDEV(NV_MAJOR_DEVICE_NUMBER, i);
+            created = device_create(g_frontend_class, NULL, gpu_dev, NULL, "nvidia%d", i, NULL);
+            if (IS_ERR(created)) {
+                int err = PTR_ERR(created);
+                printk(KERN_WARNING "Error %d while trying to create nvidia%d\n", err, i, NULL);
+            }
+        }
+    }
     return status;
 }
 
@@ -384,6 +429,22 @@ static void __exit nvidia_frontend_exit_module(void)
      */
     if (nv_num_instances == 1)
     {
+        if (g_frontend_class) {
+           int i;
+                   printk(KERN_WARNING "destroy 254+255\n");
+           device_destroy(g_frontend_class, MKDEV(NV_MAJOR_DEVICE_NUMBER, 254));
+           device_destroy(g_frontend_class, MKDEV(NV_MAJOR_DEVICE_NUMBER, 255));
+           for (i = 0; i <= NV_FRONTEND_CONTROL_DEVICE_MINOR_MIN; i++)
+           {
+               if (nv_minor_num_table[i] != NULL) {
+                   dev_t gpu_dev = MKDEV(NV_MAJOR_DEVICE_NUMBER, i);
+                   printk(KERN_WARNING "destroy gpu %d\n", i);
+                   device_destroy(g_frontend_class, gpu_dev);
+               }
+           }
+           class_destroy(g_frontend_class);
+           g_frontend_class = NULL;
+        }
         unregister_chrdev(NV_MAJOR_DEVICE_NUMBER, "nvidia-frontend");
     }
 
